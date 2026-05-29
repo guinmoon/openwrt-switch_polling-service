@@ -1,0 +1,25 @@
+{
+  "port": 3000,
+  "host": "0.0.0.0",
+  "secretKey": "super-secret-key-12345",
+  "switches": [
+    {
+      "id": "switch1",
+      "name": "LED Light",
+      "state": false,
+      "action": "turn_off_led.sh"
+    },
+    {
+      "id": "switch2",
+      "name": "Fan",
+      "state": false,
+      "action": "turn_off_fan.sh"
+    },
+    {
+      "id": "switch3",
+      "name": "Relay 1",
+      "state": false,
+      "action": "gpio_off_1.sh"
+    }
+  ]
+}

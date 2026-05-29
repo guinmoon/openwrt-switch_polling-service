@@ -1,0 +1,180 @@
+#!/bin/sh
+#
+# OpenWRT клиент для периодической проверки выключателей на сервере.
+# Если выключатель включен — выполняет его action и выключает его на сервере.
+#
+# Установка:
+#   1. Скопировать на роутер: scp openwrt_switch_client.sh root@router:/usr/bin/
+#   2. chmod +x /usr/bin/openwrt_switch_client.sh
+#   3. Отредактировать SERVER_URL и SECRET_KEY в настройках ниже
+#   4. Добавить в cron:
+#        echo "*/1 * * * * /usr/bin/openwrt_switch_client.sh 30" >> /etc/crontabs/root
+#        /etc/init.d/cron restart
+#
+# Запуск вручную: ./openwrt_switch_client.sh <интервал_сек>
+
+INTERVAL=${1:-5}
+
+# === НАСТРОЙКИ (измените под себя) ===
+SERVER_URL="http://192.168.1.217:3000"
+SECRET_KEY="my-secret-key-12345"
+# ========================================
+
+LOG_TAG="switch_client"
+
+log_msg() {
+    logger -t "$LOG_TAG" "$1"
+}
+
+# GET /switches?key=... — получить все выключатели
+get_switches() {
+    curl -s "${SERVER_URL}/switches?key=${SECRET_KEY}" 2>/dev/null
+}
+
+# POST /switch/:id/set — выключить выключатель (on=false)
+turn_off_switch() {
+    local switch_id="$1"
+    curl -s -X POST "${SERVER_URL}/switch/${switch_id}/set" \
+        -H "Content-Type: application/json" \
+        -d "{\"key\":\"${SECRET_KEY}\",\"on\":false}" 2>/dev/null
+}
+
+# Выполнить action и выключить выключатель на сервере
+process_switch() {
+    local switch_id="$1"
+    local switch_name="$2"
+    local action="$3"
+    
+    log_msg "Switch ${switch_id} (${switch_name}) is ON. Executing action: ${action}"
+
+    # Выполняем action (скрипт или команда)
+    if [ -n "$action" ]; then
+        if [ -x "$action" ]; then
+            log_msg "Running script: ${action}"
+            "$action" 2>&1 | while IFS= read -r line; do logger -t "$LOG_TAG" "$line"; done
+            local exit_code=$?
+            log_msg "Script ${action} exited with code: ${exit_code}"
+        else
+            log_msg "Running command: ${action}"
+            eval "$action" 2>&1 | while IFS= read -r line; do logger -t "$LOG_TAG" "$line"; done
+            local exit_code=$?
+            log_msg "Command ${action} exited with code: ${exit_code}"
+        fi
+    fi
+    
+    # Выключаем выключатель на сервере
+    log_msg "Turning off switch ${switch_id} on server"
+    turn_off_switch "$switch_id"
+}
+
+# --- Парсинг с jq (предпочтительный) ---
+check_with_jq() {
+    local response
+    response=$(get_switches)
+    
+    if [ -z "$response" ]; then
+        log_msg "Failed to get switches from server"
+        return 1
+    fi
+
+    local count
+    count=$(echo "$response" | jq '.switches | length' 2>/dev/null)
+
+    if [ -z "$count" ] || [ "$count" = "null" ] || [ "$count" -eq 0 ] 2>/dev/null; then
+        log_msg "No switches found"
+        return 0
+    fi
+
+    local i=0
+    while [ "$i" -lt "$count" ]; do
+        local state id name action
+        state=$(echo "$response" | jq -r ".switches[$i].state" 2>/dev/null)
+
+        if [ "$state" = "true" ]; then
+            id=$(echo "$response" | jq -r ".switches[$i].id" 2>/dev/null)
+            name=$(echo "$response" | jq -r ".switches[$i].name" 2>/dev/null)
+            action=$(echo "$response" | jq -r ".switches[$i].action" 2>/dev/null)
+            process_switch "$id" "$name" "$action"
+        fi
+        i=$((i + 1))
+    done
+}
+
+# --- Парсинг без jq (grep/sed fallback) ---
+check_without_jq() {
+    local response
+    response=$(get_switches)
+    
+    if [ -z "$response" ]; then
+        log_msg "Failed to get switches from server"
+        return 1
+    fi
+    
+    # Извлекаем массивы полей через grep/sed
+    local ids names actions states
+    ids=$(echo "$response" | grep -o '"id" *: *"[^"]*"' | sed 's/.*"id" *: *"//;s/"//')
+    names=$(echo "$response" | grep -o '"name" *: *"[^"]*"' | sed 's/.*"name" *: *"//;s/"//')
+    actions=$(echo "$response" | grep -o '"action" *: *"[^"]*"' | sed 's/.*"action" *: *"//;s/"//')
+    states=$(echo "$response" | grep -o '"state" *: *[a-z]*' | sed 's/.*"state" *: *//')
+
+    local count
+    count=$(echo "$states" | wc -l)
+    count=$(echo "$count" | tr -d ' ')
+
+    if [ "$count" -eq 0 ] 2>/dev/null; then
+        log_msg "No switches found"
+        return 0
+    fi
+
+    local i=1
+    while [ "$i" -le "$count" ]; do
+        local state id name action
+        state=$(echo "$states" | sed -n "${i}p")
+
+        if [ "$state" = "true" ]; then
+            id=$(echo "$ids" | sed -n "${i}p")
+            name=$(echo "$names" | sed -n "${i}p")
+            action=$(echo "$actions" | sed -n "${i}p")
+            process_switch "$id" "$name" "$action"
+        fi
+        i=$((i + 1))
+    done
+}
+
+# Главный цикл
+main() {
+    log_msg "Starting switch client. Interval: ${INTERVAL}s, Server: ${SERVER_URL}"
+    
+    while true; do
+        if command -v jq >/dev/null 2>&1; then
+            check_with_jq
+        else
+            check_without_jq
+        fi
+        sleep "$INTERVAL"
+    done
+}
+
+# Управление сервисом
+case "${1:-run}" in
+    start)
+        log_msg "Starting switch client service"
+        nohup "$0" run >/dev/null 2>&1 &
+        echo $! > /var/run/switch_client.pid
+        ;;
+    stop)
+        if [ -f /var/run/switch_client.pid ]; then
+            kill "$(cat /var/run/switch_client.pid)" 2>/dev/null
+            rm -f /var/run/switch_client.pid
+            log_msg "Switch client stopped"
+        fi
+        ;;
+    restart)
+        $0 stop
+        sleep 1
+        $0 start
+        ;;
+    run|*)
+        main
+        ;;
+esac
