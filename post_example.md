@@ -1,1 +1,1 @@
-curl -X POST http://http://89.169.147.56:3004/switch -H "Content-Type: application/json" -d '{"key":"my-secret-key-12345","id":"rpi_ssh_forward"}'
+curl -X POST http://http://127.0.0.1:3004/switch -H "Content-Type: application/json" -d '{"key":"my-secret-key-12345","id":"rpi_ssh_forward"}'
